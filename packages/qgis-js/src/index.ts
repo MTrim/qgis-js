@@ -11,6 +11,9 @@ export type {
   CommonQgisApi,
   InternalQgisApi,
   LayerDefinitionResult,
+  PrintLayoutInfo,
+  LayoutExportOptions,
+  LayoutExportResult,
 } from "../../../src/api/QgisApi";
 
 export type { EmscriptenFS } from "./emscripten";

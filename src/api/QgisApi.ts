@@ -155,6 +155,25 @@ export interface CommonQgisApi extends QgisModelConstructors {
   renderLegend(dpi: number, layerIds?: string[]): string;
 
   /**
+   * Lists the print layouts stored in the loaded project (layout manager).
+   *
+   * @returns One entry per print layout with its page count and atlas settings.
+   */
+  layouts(): PrintLayoutInfo[];
+
+  /**
+   * Exports a print layout of the loaded project.
+   *
+   * Runs synchronously. For layouts with an enabled atlas, all atlas features
+   * (or only `atlasFeatureIds`) are exported into one PDF.
+   *
+   * @param name - The name of the layout as listed by {@link layouts}.
+   * @param options - Output format, resolution, page (PNG) and atlas features.
+   * @returns The exported file as bytes, or an error message.
+   */
+  exportLayout(name: string, options?: LayoutExportOptions): LayoutExportResult;
+
+  /**
    * Renders an image of the loaded project and provides a QgsMapRendererParallelJob object to monitor the rendering progress and to retrieve preview images.
    *
    * @param srid - The SRID of the image.
@@ -282,3 +301,43 @@ export interface InternalQgisApi extends CommonQgisApi {
   ): number;
   mapThemes(): any;
 }
+
+/**
+ * A print layout of the loaded project.
+ */
+export interface PrintLayoutInfo {
+  name: string;
+  pages: number;
+  atlas: {
+    enabled: boolean;
+    coverageLayerId?: string;
+    coverageLayerName?: string;
+    filterFeatures?: boolean;
+  };
+}
+
+/**
+ * Options for {@link CommonQgisApi.exportLayout}.
+ */
+export interface LayoutExportOptions {
+  /** Output format, defaults to "pdf". */
+  format?: "pdf" | "png";
+  /** Resolution in dots per inch, defaults to 150. */
+  dpi?: number;
+  /** Zero-based page for PNG output, defaults to 0. */
+  page?: number;
+  /** Atlas layouts only: feature ids of the coverage layer to export; empty or omitted exports all. */
+  atlasFeatureIds?: number[];
+}
+
+/**
+ * Result of {@link CommonQgisApi.exportLayout}.
+ */
+export interface LayoutExportResult {
+  success: boolean;
+  data?: Uint8Array;
+  error?: string;
+  /** Number of atlas features (pages groups) exported, 1 without atlas. */
+  count?: number;
+}
+
