@@ -6,12 +6,17 @@
 // thread; map items render with QgsMapRendererCustomPainterJob, which does
 // not need worker threads.
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <qgsexpressioncontextutils.h>
+#include <qgsfillsymbol.h>
 #include <qgslayoutatlas.h>
+#include <qgslayoutitemmap.h>
+#include <qgslayoutitempage.h>
+#include <qgslayoutmeasurementconverter.h>
 #include <qgslayoutexporter.h>
 #include <qgslayoutmanager.h>
 #include <qgslayoutpagecollection.h>
@@ -61,9 +66,121 @@ struct AtlasState {
   }
 };
 
+// Page sizes and map items of the layout in its current state (current
+// atlas feature), one entry per page, in mm. Lets the caller draw what QGIS
+// cannot render here (online layers) underneath / on top of each map item.
+void appendPageInfo(QgsLayout *layout, emscripten::val &pages) {
+  const QgsLayoutMeasurementConverter &conv = layout->renderContext().measurementConverter();
+  QList<QgsLayoutItemMap *> maps;
+  layout->layoutItems(maps);
+  QgsLayoutPageCollection *collection = layout->pageCollection();
+  for (int i = 0; i < collection->pageCount(); i++) {
+    const QgsLayoutSize size = conv.convert(collection->page(i)->pageSize(), Qgis::LayoutUnit::Millimeters);
+    emscripten::val page = emscripten::val::object();
+    page.set("width", size.width());
+    page.set("height", size.height());
+    emscripten::val list = emscripten::val::array();
+    for (int index = 0; index < maps.size(); index++) {
+      QgsLayoutItemMap *map = maps[index];
+      if (map->page() != i || !map->isVisible())
+        continue;
+      const QgsLayoutPoint pos = conv.convert(map->pagePositionWithUnits(), Qgis::LayoutUnit::Millimeters);
+      const QgsLayoutSize msize = conv.convert(map->sizeWithUnits(), Qgis::LayoutUnit::Millimeters);
+      const QgsRectangle extent = map->extent();
+      emscripten::val item = emscripten::val::object();
+      item.set("id", map->id().toStdString());
+      item.set("index", index);
+      item.set("x", pos.x());
+      item.set("y", pos.y());
+      item.set("width", msize.width());
+      item.set("height", msize.height());
+      emscripten::val ext = emscripten::val::array();
+      ext.call<void>("push", extent.xMinimum());
+      ext.call<void>("push", extent.yMinimum());
+      ext.call<void>("push", extent.xMaximum());
+      ext.call<void>("push", extent.yMaximum());
+      item.set("extent", ext);
+      item.set("rotation", map->mapRotation());
+      item.set("itemRotation", map->itemRotation());
+      item.set("crs", map->crs().authid().toStdString());
+      item.set("scale", map->scale());
+      list.call<void>("push", item);
+    }
+    page.set("maps", list);
+    pages.call<void>("push", page);
+  }
+}
+
+// Switches map item and page backgrounds off for the export and back on
+// afterwards, so the caller can place content underneath the map items.
+struct TransparentMaps {
+  QgsLayout *layout = nullptr;
+  std::vector<std::pair<QgsLayoutItemMap *, bool>> saved;
+  std::unique_ptr<QgsFillSymbol> pageSymbol;
+  TransparentMaps(QgsLayout *layout, bool active) {
+    if (!active)
+      return;
+    this->layout = layout;
+    QList<QgsLayoutItemMap *> maps;
+    layout->layoutItems(maps);
+    for (QgsLayoutItemMap *map : maps) {
+      saved.emplace_back(map, map->hasBackground());
+      map->setBackgroundEnabled(false);
+    }
+    QgsLayoutPageCollection *pages = layout->pageCollection();
+    if (pages->pageStyleSymbol())
+      pageSymbol.reset(pages->pageStyleSymbol()->clone());
+    std::unique_ptr<QgsFillSymbol> clear(QgsFillSymbol::createSimple(
+      {{QStringLiteral("color"), QStringLiteral("0,0,0,0")}, {QStringLiteral("outline_style"), QStringLiteral("no")}}));
+    pages->setPageStyleSymbol(clear.get());
+  }
+  ~TransparentMaps() {
+    for (auto &[map, background] : saved)
+      map->setBackgroundEnabled(background);
+    if (layout && pageSymbol)
+      layout->pageCollection()->setPageStyleSymbol(pageSymbol.get());
+  }
+};
+
+// Moves map items to a new center and scale for the export and restores the
+// stored extents afterwards. Not for atlas layouts, the atlas sets the extent.
+struct MapOverrides {
+  std::vector<std::pair<QgsLayoutItemMap *, QgsRectangle>> saved;
+  MapOverrides(QgsLayout *layout, const std::optional<emscripten::val> &list) {
+    if (!list.has_value())
+      return;
+    QList<QgsLayoutItemMap *> maps;
+    layout->layoutItems(maps);
+    const int length = (*list)["length"].as<int>();
+    for (int i = 0; i < length; i++) {
+      emscripten::val entry = (*list)[i];
+      const int index = entry["index"].as<int>();
+      if (index < 0 || index >= maps.size())
+        continue;
+      QgsLayoutItemMap *map = maps[index];
+      emscripten::val center = entry["center"];
+      const double x = center[0].as<double>();
+      const double y = center[1].as<double>();
+      const double scale = entry["scale"].as<double>();
+      if (!(scale > 0))
+        continue;
+      saved.emplace_back(map, map->extent());
+      // zoomToExtent keeps the item's aspect ratio, setScale then scales
+      // around the center
+      map->zoomToExtent(QgsRectangle(x - 1, y - 1, x + 1, y + 1));
+      map->setScale(scale);
+    }
+  }
+  ~MapOverrides() {
+    for (auto &[map, extent] : saved)
+      map->setExtent(extent);
+  }
+};
+
 } // namespace
 
-// [{ name, pages, atlas: { enabled, coverageLayerId, coverageLayerName, count } }]
+// [{ name, pages, atlas: { enabled, coverageLayerId, coverageLayerName },
+//    pageInfo: [{ width, height, maps: [...] }] (see appendPageInfo) }]
 emscripten::val QgisLayouts_layouts() {
   emscripten::val list = emscripten::val::array();
   const QList<QgsPrintLayout *> layouts = QgsProject::instance()->layoutManager()->printLayouts();
@@ -82,14 +199,22 @@ emscripten::val QgisLayouts_layouts() {
       atlasInfo.set("filterFeatures", atlas->filterFeatures());
     }
     entry.set("atlas", atlasInfo);
+    // map items as stored in the project (unrotated extents, mm on the page)
+    emscripten::val pageInfo = emscripten::val::array();
+    appendPageInfo(layout, pageInfo);
+    entry.set("pageInfo", pageInfo);
     list.call<void>("push", entry);
   }
   return list;
 }
 
 // options: { format?: "pdf" | "png", dpi?: number, page?: number (png only),
-//            atlasFeatureIds?: number[] (atlas layouts only, empty = all) }
-// returns { success, data?: Uint8Array, error?: string, count?: number }
+//            atlasFeatureIds?: number[] (atlas layouts only, empty = all),
+//            transparentMaps?: boolean (no map item and page background, PDF only),
+//            maps?: [{ index, center: [x, y], scale }] (move map items, not atlas) }
+// returns { success, data?: Uint8Array, error?: string, count?: number,
+//           pages?: [{ width, height, maps: [{ id, x, y, width, height, extent,
+//                     rotation, itemRotation, crs, scale }] }] (PDF only, mm) }
 emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscripten::val> options) {
   QgsPrintLayout *layout = findLayout(name);
   if (!layout)
@@ -98,7 +223,9 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   std::string format = "pdf";
   double dpi = 150;
   int page = 0;
+  bool transparent = false;
   std::optional<std::vector<long long>> featureIds;
+  std::optional<emscripten::val> mapList;
   if (options.has_value() && !options->isUndefined() && !options->isNull()) {
     if (!(*options)["format"].isUndefined())
       format = (*options)["format"].as<std::string>();
@@ -106,6 +233,11 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       dpi = (*options)["dpi"].as<double>();
     if (!(*options)["page"].isUndefined())
       page = (*options)["page"].as<int>();
+    if (!(*options)["transparentMaps"].isUndefined())
+      transparent = (*options)["transparentMaps"].as<bool>();
+    emscripten::val overrides = (*options)["maps"];
+    if (!overrides.isUndefined() && !overrides.isNull())
+      mapList = overrides;
     emscripten::val ids = (*options)["atlasFeatureIds"];
     if (!ids.isUndefined() && !ids.isNull()) {
       std::vector<long long> list;
@@ -128,6 +260,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   QgsLayoutExporter::ExportResult result = QgsLayoutExporter::Success;
   QString error;
   int count = 1;
+  emscripten::val pages = emscripten::val::array();
 
   if (format == "pdf") {
     QgsLayoutExporter::PdfExportSettings settings;
@@ -152,9 +285,20 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       count = atlas->count();
       if (count == 0)
         return failure(QStringLiteral("The atlas has no features to export"));
+      // Map extents per atlas feature, in the order the exporter writes them
+      atlas->beginRender();
+      for (int i = 0; i < count; i++) {
+        if (atlas->seekTo(i))
+          appendPageInfo(layout, pages);
+      }
+      atlas->endRender();
+      TransparentMaps noBackground(layout, transparent);
       result = QgsLayoutExporter::exportToPdf(atlas, path, settings, error);
     } else {
+      MapOverrides moved(layout, mapList);
       layout->refresh();
+      appendPageInfo(layout, pages);
+      TransparentMaps noBackground(layout, transparent);
       QgsLayoutExporter exporter(layout);
       result = exporter.exportToPdf(path, settings);
     }
@@ -179,6 +323,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       result = exporter.exportToImage(path, settings);
       atlas->endRender();
     } else {
+      MapOverrides moved(layout, mapList);
       layout->refresh();
       QgsLayoutExporter exporter(layout);
       result = exporter.exportToImage(path, settings);
@@ -208,6 +353,8 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   out.set("success", true);
   out.set("data", bytesToJs(bytes));
   out.set("count", count);
+  if (format == "pdf")
+    out.set("pages", pages);
   return out;
 }
 

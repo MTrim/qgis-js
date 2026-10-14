@@ -314,6 +314,8 @@ export interface PrintLayoutInfo {
     coverageLayerName?: string;
     filterFeatures?: boolean;
   };
+  /** Pages with their map items as stored in the project. */
+  pageInfo: LayoutPageInfo[];
 }
 
 /**
@@ -328,6 +330,40 @@ export interface LayoutExportOptions {
   page?: number;
   /** Atlas layouts only: feature ids of the coverage layer to export; empty or omitted exports all. */
   atlasFeatureIds?: number[];
+  /** PDF only: draw map items and pages without their background, so content can be placed underneath. */
+  transparentMaps?: boolean;
+  /** Non-atlas layouts: move map items (by {@link LayoutMapInfo.index}) to a new center and scale for this export. */
+  maps?: { index: number; center: [number, number]; scale: number }[];
+}
+
+/**
+ * A map item on an exported page, in millimetres from the page's top left corner.
+ */
+export interface LayoutMapInfo {
+  id: string;
+  /** Position among the layout's map items, used by {@link LayoutExportOptions.maps}. */
+  index: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Unrotated map extent [xmin, ymin, xmax, ymax] in `crs`. */
+  extent: [number, number, number, number];
+  /** Map rotation in degrees, clockwise. */
+  rotation: number;
+  /** Rotation of the item on the page in degrees, clockwise. */
+  itemRotation: number;
+  crs: string;
+  scale: number;
+}
+
+/**
+ * An exported page with its size in millimetres and its map items.
+ */
+export interface LayoutPageInfo {
+  width: number;
+  height: number;
+  maps: LayoutMapInfo[];
 }
 
 /**
@@ -339,5 +375,7 @@ export interface LayoutExportResult {
   error?: string;
   /** Number of atlas features (pages groups) exported, 1 without atlas. */
   count?: number;
+  /** PDF only: one entry per page of the output, in output order. */
+  pages?: LayoutPageInfo[];
 }
 

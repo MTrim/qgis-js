@@ -14,6 +14,8 @@ export type {
   PrintLayoutInfo,
   LayoutExportOptions,
   LayoutExportResult,
+  LayoutMapInfo,
+  LayoutPageInfo,
 } from "../../../src/api/QgisApi";
 
 export type { EmscriptenFS } from "./emscripten";
