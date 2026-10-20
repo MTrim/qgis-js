@@ -181,6 +181,9 @@ export interface CommonQgisApi extends QgisModelConstructors {
    * @param width - The width of the image.
    * @param height - The height of the image.
    * @param pixelRatio - The optional pixel ratio of the image which defaults to 1.
+   * @param layerIds - Optional list of layer ids to render (defaults to all visible layers).
+   * @param rotation - Optional map rotation in degrees, clockwise (like QGIS Desktop). The extent is
+   *   then the unrotated extent around the map center; labels and point symbols stay upright.
    * @returns A QgsMapRendererParallelJob object that can be used to monitor the rendering progress and to retrieve preview images.
    */
   renderJob(
@@ -190,6 +193,7 @@ export interface CommonQgisApi extends QgisModelConstructors {
     height: number,
     pixelRatio: number,
     layerIds?: string[],
+    rotation?: number,
   ): QgsMapRendererParallelJob;
 
   /**

@@ -209,7 +209,8 @@ QgsMapRendererParallelJob *QgisApi_renderJob(
   unsigned int width,
   unsigned int height,
   float pixelRatio,
-  std::optional<emscripten::val> layerIds) {
+  std::optional<emscripten::val> layerIds,
+  std::optional<emscripten::val> rotation) {
 
   QgsMapSettings mapSettings;
 
@@ -221,6 +222,12 @@ QgsMapRendererParallelJob *QgisApi_renderJob(
   mapSettings.setLayers(resolveLayers(layerIds));
 
   mapSettings.setDestinationCrs(QgsCoordinateReferenceSystem(QString::fromStdString(srid)));
+
+  // rotation in degrees, clockwise like QGIS Desktop; the extent is then the
+  // unrotated extent around the map center (labels and markers stay upright)
+  if (rotation.has_value() && rotation->isNumber()) {
+    mapSettings.setRotation(rotation->as<double>());
+  }
 
   mapSettings.setExtent(extent);
 
