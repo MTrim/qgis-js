@@ -6,6 +6,7 @@
 // thread; map items render with QgsMapRendererCustomPainterJob, which does
 // not need worker threads.
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -16,6 +17,7 @@
 #include <qgslayoutatlas.h>
 #include <qgslayoutitemmap.h>
 #include <qgslayoutitempage.h>
+#include <qgslayoutitemregistry.h>
 #include <qgslayoutmeasurementconverter.h>
 #include <qgslayoutexporter.h>
 #include <qgslayoutmanager.h>
@@ -142,6 +144,42 @@ struct TransparentMaps {
   }
 };
 
+// Splits the page at the lowest map item (z order), so content can be placed
+// between the two halves: "below" exports only items under the maps, "above"
+// the maps and everything on top of them. Needed with transparentMaps: a
+// filled frame under the map would otherwise cover whatever is put beneath
+// the whole page (mobileVIEW, MEGIS layout "Ausgabe - A3", 27.10.2026).
+// Pages and groups stay untouched, hidden items are restored afterwards.
+struct LayerSplit {
+  std::vector<QgsLayoutItem *> hidden;
+  LayerSplit(QgsLayout *layout, const std::string &mode) {
+    if (mode != "below" && mode != "above")
+      return;
+    QList<QgsLayoutItemMap *> maps;
+    layout->layoutItems(maps);
+    if (maps.isEmpty())
+      return;
+    double minZ = std::numeric_limits<double>::max();
+    for (QgsLayoutItemMap *map : maps)
+      minZ = std::min(minZ, map->zValue());
+    QList<QgsLayoutItem *> items;
+    layout->layoutItems(items);
+    for (QgsLayoutItem *item : items) {
+      if (item->type() == QgsLayoutItemRegistry::LayoutPage || item->type() == QgsLayoutItemRegistry::LayoutGroup)
+        continue;
+      const bool below = item->zValue() < minZ;
+      if ((mode == "below") != below && item->isVisible()) {
+        item->setVisibility(false);
+        hidden.push_back(item);
+      }
+    }
+  }
+  ~LayerSplit() {
+    for (QgsLayoutItem *item : hidden)
+      item->setVisibility(true);
+  }
+};
+
 // Moves map items to a new center and scale for the export and restores the
 // stored extents afterwards. Not for atlas layouts, the atlas sets the extent.
 struct MapOverrides {
@@ -211,6 +249,7 @@ emscripten::val QgisLayouts_layouts() {
 // options: { format?: "pdf" | "png", dpi?: number, page?: number (png only),
 //            atlasFeatureIds?: number[] (atlas layouts only, empty = all),
 //            transparentMaps?: boolean (no map item and page background, PDF only),
+//            layer?: "below" | "above" (PDF only, see LayerSplit; echoed back),
 //            maps?: [{ index, center: [x, y], scale }] (move map items, not atlas) }
 // returns { success, data?: Uint8Array, error?: string, count?: number,
 //           pages?: [{ width, height, maps: [{ id, x, y, width, height, extent,
@@ -224,6 +263,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   double dpi = 150;
   int page = 0;
   bool transparent = false;
+  std::string layer;
   std::optional<std::vector<long long>> featureIds;
   std::optional<emscripten::val> mapList;
   if (options.has_value() && !options->isUndefined() && !options->isNull()) {
@@ -235,6 +275,8 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       page = (*options)["page"].as<int>();
     if (!(*options)["transparentMaps"].isUndefined())
       transparent = (*options)["transparentMaps"].as<bool>();
+    if (!(*options)["layer"].isUndefined())
+      layer = (*options)["layer"].as<std::string>();
     emscripten::val overrides = (*options)["maps"];
     if (!overrides.isUndefined() && !overrides.isNull())
       mapList = overrides;
@@ -293,12 +335,14 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       }
       atlas->endRender();
       TransparentMaps noBackground(layout, transparent);
+      LayerSplit split(layout, layer);
       result = QgsLayoutExporter::exportToPdf(atlas, path, settings, error);
     } else {
       MapOverrides moved(layout, mapList);
       layout->refresh();
       appendPageInfo(layout, pages);
       TransparentMaps noBackground(layout, transparent);
+      LayerSplit split(layout, layer);
       QgsLayoutExporter exporter(layout);
       result = exporter.exportToPdf(path, settings);
     }
@@ -355,6 +399,8 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   out.set("count", count);
   if (format == "pdf")
     out.set("pages", pages);
+  if (format == "pdf" && (layer == "below" || layer == "above"))
+    out.set("layer", layer);
   return out;
 }
 

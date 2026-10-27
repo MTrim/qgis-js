@@ -336,6 +336,8 @@ export interface LayoutExportOptions {
   atlasFeatureIds?: number[];
   /** PDF only: draw map items and pages without their background, so content can be placed underneath. */
   transparentMaps?: boolean;
+  /** PDF only: export just the items under the lowest map item ("below") or the maps and everything above ("above"), to put content in between. Echoed in the result when supported. */
+  layer?: "below" | "above";
   /** Non-atlas layouts: move map items (by {@link LayoutMapInfo.index}) to a new center and scale for this export. */
   maps?: { index: number; center: [number, number]; scale: number }[];
 }
@@ -381,5 +383,7 @@ export interface LayoutExportResult {
   count?: number;
   /** PDF only: one entry per page of the output, in output order. */
   pages?: LayoutPageInfo[];
+  /** The `layer` option, if this build supports it. */
+  layer?: "below" | "above";
 }
 
