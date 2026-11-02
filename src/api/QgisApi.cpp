@@ -94,6 +94,9 @@ QgsRectangle QgisApi_fullExtent(std::optional<emscripten::val> layerIds) {
   QgsMapSettings mapSettings;
   mapSettings.setDestinationCrs(QgsProject::instance()->crs());
   mapSettings.setLayers(resolveLayers(layerIds));
+  // transformations from the project (e.g. grid shifts like AT_GIS_GRID),
+  // like QgsMapCanvas; without it PROJ takes its default operation
+  mapSettings.setTransformContext(QgsProject::instance()->transformContext());
   return mapSettings.fullExtent();
 }
 
@@ -119,6 +122,12 @@ void QgisApi_renderXYZTile(
   mapSettings.setOutputDpi(96.0 * pixelRatio);
 
   mapSettings.setLayers(resolveLayers(layerIds));
+
+  // transformations from the project (e.g. grid shifts like AT_GIS_GRID),
+
+  // like QgsMapCanvas; without it PROJ takes its default operation
+
+  mapSettings.setTransformContext(QgsProject::instance()->transformContext());
 
   mapSettings.setDestinationCrs(QgsCoordinateReferenceSystem(QStringLiteral("EPSG:3857")));
 
@@ -167,6 +176,12 @@ void QgisApi_renderImage(
   mapSettings.setOutputDpi(96.0 * pixelRatio);
 
   mapSettings.setLayers(resolveLayers(layerIds));
+
+  // transformations from the project (e.g. grid shifts like AT_GIS_GRID),
+
+  // like QgsMapCanvas; without it PROJ takes its default operation
+
+  mapSettings.setTransformContext(QgsProject::instance()->transformContext());
 
   mapSettings.setDestinationCrs(QgsCoordinateReferenceSystem(QString::fromStdString(srid)));
 
@@ -220,6 +235,12 @@ QgsMapRendererParallelJob *QgisApi_renderJob(
   mapSettings.setOutputDpi(96.0 * pixelRatio);
 
   mapSettings.setLayers(resolveLayers(layerIds));
+
+  // transformations from the project (e.g. grid shifts like AT_GIS_GRID),
+
+  // like QgsMapCanvas; without it PROJ takes its default operation
+
+  mapSettings.setTransformContext(QgsProject::instance()->transformContext());
 
   mapSettings.setDestinationCrs(QgsCoordinateReferenceSystem(QString::fromStdString(srid)));
 
