@@ -6,13 +6,18 @@
 // thread; map items render with QgsMapRendererCustomPainterJob, which does
 // not need worker threads.
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include <qgsannotationlayer.h>
 #include <qgsexpressioncontextutils.h>
+#include <qgslayertree.h>
+#include <qgslayertreemodellegendnode.h>
+#include <qgsmaplayerlegend.h>
 #include <qgsfillsymbol.h>
 #include <qgslayoutatlas.h>
 #include <qgslayoutitemmap.h>
@@ -27,6 +32,7 @@
 #include <qgsvectorlayer.h>
 
 #include <QDir>
+#include <QImage>
 #include <QFile>
 #include <QStringList>
 
@@ -246,11 +252,102 @@ emscripten::val QgisLayouts_layouts() {
   return list;
 }
 
+// Legend entries for layers QGIS cannot load here (online layers, which the
+// caller draws itself): an empty annotation layer per entry, inserted into
+// the project layer tree only while exporting, so auto-updating legends list
+// it at the position it has in QGIS. Its legend is the layer name, or the
+// given image (WMS GetLegendGraphic) under the layer name. Annotation layers
+// are neither vector nor raster, so "filter legend by map content" keeps them
+// as long as the map shows the layer tree.
+class PlaceholderLegend : public QgsMapLayerLegend {
+ public:
+  PlaceholderLegend(const QString &name, const QImage &image) : mName(name), mImage(image) {}
+  QList<QgsLayerTreeModelLegendNode *> createLayerTreeModelLegendNodes(QgsLayerTreeLayer *nodeLayer) override {
+    if (!mImage.isNull())
+      return {new QgsImageLegendNode(nodeLayer, mImage)};
+    return {new QgsSimpleLegendNode(nodeLayer, mName)};
+  }
+
+ private:
+  QString mName;
+  QImage mImage;
+};
+
+// legendLayers: [{ name, groups?: [{ name, index? }], index?, visible?, image?: Uint8Array (PNG) }]
+// groups is the path from the root; a missing group is created at its index
+// (end if absent). index is the position among the group's children in QGIS.
+struct LegendPlaceholders {
+  std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeLayer *>> layers;
+  std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeGroup *>> groups;
+  explicit LegendPlaceholders(std::optional<emscripten::val> list) {
+    if (!list.has_value() || list->isUndefined() || list->isNull())
+      return;
+    QgsProject *project = QgsProject::instance();
+    QgsLayerTreeGroup *root = project->layerTreeRoot();
+    const int length = (*list)["length"].as<int>();
+    for (int i = 0; i < length; i++) {
+      emscripten::val entry = (*list)[i];
+      if (entry["name"].isUndefined())
+        continue;
+      const QString name = QString::fromStdString(entry["name"].as<std::string>());
+      QgsLayerTreeGroup *parent = root;
+      emscripten::val path = entry["groups"];
+      const int depth = path.isUndefined() || path.isNull() ? 0 : path["length"].as<int>();
+      for (int d = 0; d < depth; d++) {
+        const QString groupName = QString::fromStdString(path[d]["name"].as<std::string>());
+        QgsLayerTreeGroup *found = nullptr;
+        for (QgsLayerTreeNode *child : parent->children()) {
+          if (QgsLayerTree::isGroup(child) && child->name() == groupName) {
+            found = QgsLayerTree::toGroup(child);
+            break;
+          }
+        }
+        if (!found) {
+          const int at = path[d]["index"].isUndefined() ? parent->children().size()
+                                                        : std::clamp(path[d]["index"].as<int>(), 0, (int)parent->children().size());
+          found = parent->insertGroup(at, groupName);
+          groups.emplace_back(parent, found);
+        }
+        parent = found;
+      }
+      QImage image;
+      emscripten::val png = entry["image"];
+      if (!png.isUndefined() && !png.isNull()) {
+        const std::vector<unsigned char> bytes = emscripten::convertJSArrayToNumberVector<unsigned char>(png);
+        image = QImage::fromData(bytes.data(), (int)bytes.size());
+      }
+      auto *layer = new QgsAnnotationLayer(name, QgsAnnotationLayer::LayerOptions(project->transformContext()));
+      layer->setLegend(new PlaceholderLegend(name, image));
+      project->addMapLayer(layer, false);
+      const int at = entry["index"].isUndefined() ? parent->children().size()
+                                                  : std::clamp(entry["index"].as<int>(), 0, (int)parent->children().size());
+      QgsLayerTreeLayer *node = parent->insertLayer(at, layer);
+      if (!entry["visible"].isUndefined())
+        node->setItemVisibilityChecked(entry["visible"].as<bool>());
+      // name as the only legend entry (no title above it), unless there is an image
+      if (image.isNull())
+        node->setCustomProperty(QStringLiteral("legend/title-style"), QStringLiteral("hidden"));
+      layers.emplace_back(parent, node);
+    }
+  }
+  ~LegendPlaceholders() {
+    QgsProject *project = QgsProject::instance();
+    for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+      const QString id = it->second->layerId();
+      it->first->removeChildNode(it->second);
+      project->removeMapLayer(id);
+    }
+    for (auto it = groups.rbegin(); it != groups.rend(); ++it)
+      it->first->removeChildNode(it->second);
+  }
+};
+
 // options: { format?: "pdf" | "png", dpi?: number, page?: number (png only),
 //            atlasFeatureIds?: number[] (atlas layouts only, empty = all),
 //            transparentMaps?: boolean (no map item and page background, PDF only),
 //            layer?: "below" | "above" (PDF only, see LayerSplit; echoed back),
-//            maps?: [{ index, center: [x, y], scale }] (move map items, not atlas) }
+//            maps?: [{ index, center: [x, y], scale }] (move map items, not atlas),
+//            legendLayers?: see LegendPlaceholders (4.2.2-mg6) }
 // returns { success, data?: Uint8Array, error?: string, count?: number,
 //           pages?: [{ width, height, maps: [{ id, x, y, width, height, extent,
 //                     rotation, itemRotation, crs, scale }] }] (PDF only, mm) }
@@ -266,6 +363,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   std::string layer;
   std::optional<std::vector<long long>> featureIds;
   std::optional<emscripten::val> mapList;
+  std::optional<emscripten::val> legendLayers;
   if (options.has_value() && !options->isUndefined() && !options->isNull()) {
     if (!(*options)["format"].isUndefined())
       format = (*options)["format"].as<std::string>();
@@ -277,6 +375,9 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
       transparent = (*options)["transparentMaps"].as<bool>();
     if (!(*options)["layer"].isUndefined())
       layer = (*options)["layer"].as<std::string>();
+    emscripten::val extras = (*options)["legendLayers"];
+    if (!extras.isUndefined() && !extras.isNull())
+      legendLayers = extras;
     emscripten::val overrides = (*options)["maps"];
     if (!overrides.isUndefined() && !overrides.isNull())
       mapList = overrides;
@@ -295,6 +396,8 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
   const QString path = QStringLiteral("/tmp/qgis-js-layout.%1").arg(QString::fromStdString(format));
   for (const QString &old : QDir(QStringLiteral("/tmp")).entryList(QStringList() << QStringLiteral("qgis-js-layout*"), QDir::Files))
     QFile::remove(QStringLiteral("/tmp/") + old);
+
+  LegendPlaceholders placeholders(legendLayers);
 
   QgsLayoutAtlas *atlas = layout->atlas();
   const bool useAtlas = atlas && atlas->enabled() && atlas->coverageLayer();
@@ -401,6 +504,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
     out.set("pages", pages);
   if (format == "pdf" && (layer == "below" || layer == "above"))
     out.set("layer", layer);
+  out.set("legendLayers", (int)placeholders.layers.size());
   return out;
 }
 

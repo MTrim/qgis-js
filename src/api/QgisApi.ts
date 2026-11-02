@@ -340,6 +340,8 @@ export interface LayoutExportOptions {
   layer?: "below" | "above";
   /** Non-atlas layouts: move map items (by {@link LayoutMapInfo.index}) to a new center and scale for this export. */
   maps?: { index: number; center: [number, number]; scale: number }[];
+  /** Legend entries for layers that cannot be loaded here (online layers): inserted into the layer tree only for this export, so auto-updating legends list them. `groups` is the path from the root (missing groups are created at `index`), `index` the position among the group's children, `image` a PNG shown under the name (e.g. a WMS legend). Counted in the result. */
+  legendLayers?: { name: string; groups?: { name: string; index?: number }[]; index?: number; visible?: boolean; image?: Uint8Array }[];
 }
 
 /**
@@ -385,5 +387,7 @@ export interface LayoutExportResult {
   pages?: LayoutPageInfo[];
   /** The `layer` option, if this build supports it. */
   layer?: "below" | "above";
+  /** Number of legend placeholders inserted (4.2.2-mg6 and later). */
+  legendLayers?: number;
 }
 
