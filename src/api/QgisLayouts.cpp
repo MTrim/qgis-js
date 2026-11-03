@@ -42,6 +42,7 @@
 #include <QFile>
 #include <QSet>
 #include <QStringList>
+#include <QVariant>
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
@@ -335,6 +336,9 @@ struct LegendPlaceholders {
   std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeLayer *>> layers;
   std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeGroup *>> groups;
   QSet<QString> untitled;
+  // title style of nodes in custom legend trees before the export, restored
+  // afterwards (the layout keeps its own tree between exports)
+  std::vector<std::pair<QgsLayerTreeLayer *, QVariant>> titleStyles;
   // Legends with their own layer tree: resolve the placeholders by id, the
   // nodes fall back to "layer missing" when the placeholders are removed
   void attachTo(QgsLayout *layout) {
@@ -348,8 +352,10 @@ struct LegendPlaceholders {
       QgsLayerTreeGroup *root = legend->model()->rootGroup();
       root->resolveReferences(QgsProject::instance());
       for (QgsLayerTreeLayer *node : root->findLayers()) {
-        if (untitled.contains(node->layerId()))
+        if (untitled.contains(node->layerId())) {
+          titleStyles.emplace_back(node, node->customProperty(QStringLiteral("legend/title-style")));
           node->setCustomProperty(QStringLiteral("legend/title-style"), QStringLiteral("hidden"));
+        }
       }
       legend->updateLegend();
     }
@@ -428,6 +434,12 @@ struct LegendPlaceholders {
     }
   }
   ~LegendPlaceholders() {
+    for (const auto &[node, value] : titleStyles) {
+      if (value.isValid())
+        node->setCustomProperty(QStringLiteral("legend/title-style"), value);
+      else
+        node->removeCustomProperty(QStringLiteral("legend/title-style"));
+    }
     QgsProject *project = QgsProject::instance();
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
       const QString id = it->second->layerId();
