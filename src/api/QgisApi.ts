@@ -340,8 +340,17 @@ export interface LayoutExportOptions {
   layer?: "below" | "above";
   /** Non-atlas layouts: move map items (by {@link LayoutMapInfo.index}) to a new center and scale for this export. */
   maps?: { index: number; center: [number, number]; scale: number }[];
-  /** Legend entries for layers that cannot be loaded here (online layers): inserted into the layer tree only for this export, so auto-updating legends list them. `groups` is the path from the root (missing groups are created at `index`), `index` the position among the group's children, `image` a PNG shown under the name (e.g. a WMS legend). Counted in the result. */
-  legendLayers?: { name: string; groups?: { name: string; index?: number }[]; index?: number; visible?: boolean; image?: Uint8Array }[];
+  /** Legend entries for layers that cannot be loaded here (online layers): inserted into the layer tree only for this export, so auto-updating legends list them. `groups` is the path from the root (missing groups are created at `index`), `index` the position among the group's children, `image` a PNG shown under the name (e.g. a WMS legend), `items` the layer's own entries (4.2.2-mg7: label in the legend font, PNG scaled into the legend's symbol size), `title: false` hides the layer name above them, `id` (4.2.2-mg7) is the layer's id in the project file, so legends with their own layer tree show the placeholder too. Counted in the result. */
+  legendLayers?: {
+    name: string;
+    groups?: { name: string; index?: number }[];
+    index?: number;
+    visible?: boolean;
+    image?: Uint8Array;
+    items?: { label: string; image?: Uint8Array }[];
+    title?: boolean;
+    id?: string;
+  }[];
 }
 
 /**

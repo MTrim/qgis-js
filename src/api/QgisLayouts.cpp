@@ -17,9 +17,12 @@
 #include <qgsexpressioncontextutils.h>
 #include <qgslayertree.h>
 #include <qgslayertreemodellegendnode.h>
+#include <qgslegendsettings.h>
+#include <qgsrendercontext.h>
 #include <qgsmaplayerlegend.h>
 #include <qgsfillsymbol.h>
 #include <qgslayoutatlas.h>
+#include <qgslayoutitemlegend.h>
 #include <qgslayoutitemmap.h>
 #include <qgslayoutitempage.h>
 #include <qgslayoutitemregistry.h>
@@ -32,8 +35,12 @@
 #include <qgsvectorlayer.h>
 
 #include <QDir>
+#include <QIcon>
 #include <QImage>
+#include <QPainter>
+#include <QPixmap>
 #include <QFile>
+#include <QSet>
 #include <QStringList>
 
 #include <emscripten/bind.h>
@@ -259,10 +266,53 @@ emscripten::val QgisLayouts_layouts() {
 // given image (WMS GetLegendGraphic) under the layer name. Annotation layers
 // are neither vector nor raster, so "filter legend by map content" keeps them
 // as long as the map shows the layer tree.
+// One legend entry drawn by the caller (rule or category of an online layer,
+// 4.2.2-mg7): the label in the legend's own font, the PNG scaled into the
+// legend's symbol size (aspect kept, centred) and drawn as an image, so a PDF
+// keeps its full resolution instead of an icon pixmap at device size.
+class ImageSymbolLegendNode : public QgsSimpleLegendNode {
+ public:
+  ImageSymbolLegendNode(QgsLayerTreeLayer *nodeLayer, const QString &label, const QImage &image)
+      : QgsSimpleLegendNode(nodeLayer, label, image.isNull() ? QIcon() : QIcon(QPixmap::fromImage(image))), mImage(image) {}
+  QSizeF drawSymbol(const QgsLegendSettings &settings, ItemContext *ctx, double itemHeight) const override {
+    if (mImage.isNull())
+      return QSizeF();
+    QSizeF size = settings.symbolSize();
+    if (ctx && ctx->patchSize.width() > 0)
+      size.setWidth(ctx->patchSize.width());
+    if (ctx && ctx->patchSize.height() > 0)
+      size.setHeight(ctx->patchSize.height());
+    if (ctx && ctx->painter && ctx->context) {
+      const QgsScopedRenderContextScaleToPixels scopedScaleToPixels(*(ctx->context));
+      const double k = ctx->context->scaleFactor();
+      const double ratio = std::min(size.width() / mImage.width(), size.height() / mImage.height());
+      const double w = mImage.width() * ratio;
+      const double h = mImage.height() * ratio;
+      const double left = settings.symbolAlignment() == Qt::AlignRight ? ctx->columnRight - size.width() : ctx->columnLeft;
+      const double x = left + (size.width() - w) / 2;
+      const double y = ctx->top + (itemHeight - h) / 2;
+      ctx->painter->drawImage(QRectF(x * k, y * k, w * k, h * k), mImage);
+    }
+    return size;
+  }
+
+ private:
+  QImage mImage;
+};
+
+// Legend of a placeholder: the layer name, the given image (WMS
+// GetLegendGraphic) under the layer name, or the caller's entries (items).
 class PlaceholderLegend : public QgsMapLayerLegend {
  public:
-  PlaceholderLegend(const QString &name, const QImage &image) : mName(name), mImage(image) {}
+  PlaceholderLegend(const QString &name, const QImage &image, std::vector<std::pair<QString, QImage>> items = {})
+      : mName(name), mImage(image), mItems(std::move(items)) {}
   QList<QgsLayerTreeModelLegendNode *> createLayerTreeModelLegendNodes(QgsLayerTreeLayer *nodeLayer) override {
+    if (!mItems.empty()) {
+      QList<QgsLayerTreeModelLegendNode *> nodes;
+      for (const auto &[label, image] : mItems)
+        nodes << new ImageSymbolLegendNode(nodeLayer, label, image);
+      return nodes;
+    }
     if (!mImage.isNull())
       return {new QgsImageLegendNode(nodeLayer, mImage)};
     return {new QgsSimpleLegendNode(nodeLayer, mName)};
@@ -271,14 +321,39 @@ class PlaceholderLegend : public QgsMapLayerLegend {
  private:
   QString mName;
   QImage mImage;
+  std::vector<std::pair<QString, QImage>> mItems;
 };
 
-// legendLayers: [{ name, groups?: [{ name, index? }], index?, visible?, image?: Uint8Array (PNG) }]
+// legendLayers: [{ name, groups?: [{ name, index? }], index?, visible?, image?: Uint8Array (PNG),
+//                 items?: [{ label, image?: Uint8Array (PNG) }], title?: boolean, id?: string }]
+// id (4.2.2-mg7): the original layer id from the project file. Legends with
+// their own layer tree (not "auto update") list layers by id; with the id the
+// placeholder takes that place too (MEGIS G6000_TVCOM "Ausgabe - A3").
 // groups is the path from the root; a missing group is created at its index
 // (end if absent). index is the position among the group's children in QGIS.
 struct LegendPlaceholders {
   std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeLayer *>> layers;
   std::vector<std::pair<QgsLayerTreeGroup *, QgsLayerTreeGroup *>> groups;
+  QSet<QString> untitled;
+  // Legends with their own layer tree: resolve the placeholders by id, the
+  // nodes fall back to "layer missing" when the placeholders are removed
+  void attachTo(QgsLayout *layout) {
+    if (layers.empty())
+      return;
+    QList<QgsLayoutItemLegend *> legends;
+    layout->layoutItems(legends);
+    for (QgsLayoutItemLegend *legend : legends) {
+      if (legend->autoUpdateModel())
+        continue;
+      QgsLayerTreeGroup *root = legend->model()->rootGroup();
+      root->resolveReferences(QgsProject::instance());
+      for (QgsLayerTreeLayer *node : root->findLayers()) {
+        if (untitled.contains(node->layerId()))
+          node->setCustomProperty(QStringLiteral("legend/title-style"), QStringLiteral("hidden"));
+      }
+      legend->updateLegend();
+    }
+  }
   explicit LegendPlaceholders(std::optional<emscripten::val> list) {
     if (!list.has_value() || list->isUndefined() || list->isNull())
       return;
@@ -310,23 +385,45 @@ struct LegendPlaceholders {
         }
         parent = found;
       }
-      QImage image;
-      emscripten::val png = entry["image"];
-      if (!png.isUndefined() && !png.isNull()) {
-        const std::vector<unsigned char> bytes = emscripten::convertJSArrayToNumberVector<unsigned char>(png);
-        image = QImage::fromData(bytes.data(), (int)bytes.size());
+      auto readPng = [](emscripten::val png) {
+        QImage image;
+        if (!png.isUndefined() && !png.isNull()) {
+          const std::vector<unsigned char> bytes = emscripten::convertJSArrayToNumberVector<unsigned char>(png);
+          image = QImage::fromData(bytes.data(), (int)bytes.size());
+        }
+        return image;
+      };
+      const QImage image = readPng(entry["image"]);
+      std::vector<std::pair<QString, QImage>> items;
+      emscripten::val itemList = entry["items"];
+      if (!itemList.isUndefined() && !itemList.isNull()) {
+        const int count = itemList["length"].as<int>();
+        for (int k = 0; k < count; k++) {
+          emscripten::val item = itemList[k];
+          const QString label = item["label"].isUndefined() ? QString() : QString::fromStdString(item["label"].as<std::string>());
+          items.emplace_back(label, readPng(item["image"]));
+        }
       }
       auto *layer = new QgsAnnotationLayer(name, QgsAnnotationLayer::LayerOptions(project->transformContext()));
-      layer->setLegend(new PlaceholderLegend(name, image));
+      if (!entry["id"].isUndefined() && !entry["id"].isNull()) {
+        const QString id = QString::fromStdString(entry["id"].as<std::string>());
+        if (!project->mapLayer(id))
+          layer->setId(id);
+      }
+      layer->setLegend(new PlaceholderLegend(name, image, items));
       project->addMapLayer(layer, false);
       const int at = entry["index"].isUndefined() ? parent->children().size()
                                                   : std::clamp(entry["index"].as<int>(), 0, (int)parent->children().size());
       QgsLayerTreeLayer *node = parent->insertLayer(at, layer);
       if (!entry["visible"].isUndefined())
         node->setItemVisibilityChecked(entry["visible"].as<bool>());
-      // name as the only legend entry (no title above it), unless there is an image
-      if (image.isNull())
+      // name as the only legend entry (no title above it), unless there is an
+      // image or entries; entries without title: single symbol, label = name
+      const bool title = entry["title"].isUndefined() ? true : entry["title"].as<bool>();
+      if ((image.isNull() && items.empty()) || (!items.empty() && !title)) {
         node->setCustomProperty(QStringLiteral("legend/title-style"), QStringLiteral("hidden"));
+        untitled.insert(layer->id());
+      }
       layers.emplace_back(parent, node);
     }
   }
@@ -347,7 +444,7 @@ struct LegendPlaceholders {
 //            transparentMaps?: boolean (no map item and page background, PDF only),
 //            layer?: "below" | "above" (PDF only, see LayerSplit; echoed back),
 //            maps?: [{ index, center: [x, y], scale }] (move map items, not atlas),
-//            legendLayers?: see LegendPlaceholders (4.2.2-mg6) }
+//            legendLayers?: see LegendPlaceholders (4.2.2-mg6, items 4.2.2-mg7) }
 // returns { success, data?: Uint8Array, error?: string, count?: number,
 //           pages?: [{ width, height, maps: [{ id, x, y, width, height, extent,
 //                     rotation, itemRotation, crs, scale }] }] (PDF only, mm) }
@@ -398,6 +495,7 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
     QFile::remove(QStringLiteral("/tmp/") + old);
 
   LegendPlaceholders placeholders(legendLayers);
+  placeholders.attachTo(layout);
 
   QgsLayoutAtlas *atlas = layout->atlas();
   const bool useAtlas = atlas && atlas->enabled() && atlas->coverageLayer();
