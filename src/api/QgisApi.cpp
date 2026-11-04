@@ -2,7 +2,9 @@
 #include <optional>
 #include <string>
 
+#include <qgsapplication.h>
 #include <qgsexpressioncontextutils.h>
+#include <qgsfontmanager.h>
 #include <qgslayerdefinition.h>
 #include <qgslayertree.h>
 #include <qgslayertreemodel.h>
@@ -13,6 +15,7 @@
 #include <qgsproject.h>
 #include <qgstiles.h>
 
+#include <QFontDatabase>
 #include <QImage>
 #include <QString>
 #include <QtConcurrent/QtConcurrent>
@@ -461,6 +464,28 @@ QgisApi_loadLayerDefinition(std::string path, std::optional<LayerTreeGroup> targ
   return {ok, errorMessage.toStdString()};
 }
 
+// Registers a font file (TTF/OTF) from the virtual file system for map and
+// layout rendering. Returns the families it provides, empty if it failed.
+emscripten::val QgisApi_addFont(std::string path) {
+  emscripten::val families = emscripten::val::array();
+  const int id = QFontDatabase::addApplicationFont(QString::fromStdString(path));
+  if (id < 0) {
+    return families;
+  }
+  for (const QString &family : QFontDatabase::applicationFontFamilies(id)) {
+    families.call<void>("push", family.toStdString());
+  }
+  return families;
+}
+
+// Projects that use a font family missing here (e.g. "Arial") render with
+// `replacement` instead of the application default. Must be set before the
+// project is loaded, text formats resolve the family while reading.
+void QgisApi_addFontReplacement(std::string original, std::string replacement) {
+  QgsApplication::fontManager()->addFontFamilyReplacement(
+    QString::fromStdString(original), QString::fromStdString(replacement));
+}
+
 EMSCRIPTEN_BINDINGS(QgisApi) {
   emscripten::value_object<LayerDefinitionResult>("LayerDefinitionResult")
     .field("success", &LayerDefinitionResult::success)
@@ -488,4 +513,6 @@ EMSCRIPTEN_BINDINGS(QgisApi) {
   emscripten::function("identify", &QgisApi_identify);
   emscripten::function("addMapLayer", &QgisApi_addMapLayer);
   emscripten::function("clearProject", &QgisApi_clearProject);
+  emscripten::function("addFont", &QgisApi_addFont);
+  emscripten::function("addFontReplacement", &QgisApi_addFontReplacement);
 }

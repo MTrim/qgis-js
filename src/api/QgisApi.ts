@@ -147,6 +147,21 @@ export interface CommonQgisApi extends QgisModelConstructors {
   layerTreeRoot(): QgsLayerTreeGroup;
 
   /**
+   * Registers a font file (TTF/OTF) from the virtual file system for map and
+   * layout rendering.
+   *
+   * @param path - Path of the font file in the virtual file system.
+   * @returns The font families the file provides, empty if it could not be loaded.
+   */
+  addFont(path: string): string[];
+
+  /**
+   * Renders text that uses `original` (a family missing here, e.g. "Arial")
+   * with `replacement`. Call before loading the project.
+   */
+  addFontReplacement(original: string, replacement: string): void;
+
+  /**
    * Renders the full project legend as a PNG image.
    *
    * @param dpi - The DPI for rendering the legend.
