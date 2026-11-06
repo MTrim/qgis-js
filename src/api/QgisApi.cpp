@@ -1,3 +1,4 @@
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -134,8 +135,22 @@ bool QgisApi_ensureLayouts() {
   }
   QFile file(qgsPath);
   if (!file.open(QIODevice::ReadOnly)) return false;
+  const QByteArray bytes = file.readAll();
+  // Only the <Layouts> block: parsing the whole project again costs more
+  // than the layouts themselves (Demo_Gemeinde: 16 MB XML, 8.5 s instead of
+  // the 6.7 s saved). readXml() looks for <Layouts> below the element it gets
+  // and resolves layers through the already loaded project.
   QDomDocument doc;
-  if (!doc.setContent(&file)) return false;
+  const int start = bytes.indexOf("<Layouts");
+  const int end = bytes.indexOf("</Layouts>", start);
+  bool parsed = false;
+  if (start >= 0 && end > start) {
+    QByteArray part("<qgis>");
+    part.append(bytes.mid(start, end - start + int(strlen("</Layouts>"))));
+    part.append("</qgis>");
+    parsed = static_cast<bool>(doc.setContent(part));
+  }
+  if (!parsed && !doc.setContent(bytes)) return false;
   return QgsProject::instance()->layoutManager()->readXml(doc.documentElement(), doc);
 }
 
