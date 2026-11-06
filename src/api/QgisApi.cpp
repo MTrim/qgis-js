@@ -13,6 +13,10 @@
 #include <qgsmaprenderersequentialjob.h>
 #include <qgsmapsettings.h>
 #include <qgsproject.h>
+#include <qgsarchive.h>
+#include <qgslayoutmanager.h>
+#include <QDomDocument>
+#include <QFile>
 #include <qgstiles.h>
 
 #include <QFontDatabase>
@@ -83,14 +87,60 @@ QList<QgsMapLayer *> resolveLayers(std::optional<emscripten::val> layerIds) {
   return result;
 }
 
+// Layouts read on demand (mg10): a project with many print layouts spends
+// most of QgsProject::read() in the layout manager (Demo_Gemeinde: 6.7 of
+// 7.9 s for 9 layouts), although most sessions never print.
+// loadProjectWithoutLayouts() skips them, QgisApi_ensureLayouts() reads them
+// from the same file on first use (layouts(), exportLayout()).
+namespace {
+QString gDeferredLayoutsFile;  // empty = nothing pending
+}
+
 bool QgisApi_loadProject(std::string filename) {
   Qgis::ProjectReadFlags readFlags =
     Qgis::ProjectReadFlag::ForceReadOnlyLayers | Qgis::ProjectReadFlag::TrustLayerMetadata;
 
+  gDeferredLayoutsFile.clear();
   bool res = QgsProject::instance()->read(QString::fromStdString(filename), readFlags);
   if (!res) return false;
 
   return true;
+}
+
+bool QgisApi_loadProjectWithoutLayouts(std::string filename) {
+  Qgis::ProjectReadFlags readFlags = Qgis::ProjectReadFlag::ForceReadOnlyLayers |
+                                     Qgis::ProjectReadFlag::TrustLayerMetadata |
+                                     Qgis::ProjectReadFlag::DontLoadLayouts;
+
+  gDeferredLayoutsFile.clear();
+  bool res = QgsProject::instance()->read(QString::fromStdString(filename), readFlags);
+  if (!res) return false;
+  gDeferredLayoutsFile = QString::fromStdString(filename);
+  return true;
+}
+
+// Reads the layouts skipped by loadProjectWithoutLayouts(), once. Same call
+// as QgsProject::readProjectFile() makes, on the root element of the file.
+// Returns false if the file cannot be read (layouts stay empty).
+bool QgisApi_ensureLayouts() {
+  if (gDeferredLayoutsFile.isEmpty()) return true;
+  const QString source = gDeferredLayoutsFile;
+  gDeferredLayoutsFile.clear();
+  QString qgsPath = source;
+  QgsProjectArchive archive;
+  if (source.endsWith(QStringLiteral(".qgz"), Qt::CaseInsensitive)) {
+    if (!archive.unzip(source)) return false;
+    qgsPath = archive.projectFile();
+  }
+  QFile file(qgsPath);
+  if (!file.open(QIODevice::ReadOnly)) return false;
+  QDomDocument doc;
+  if (!doc.setContent(&file)) return false;
+  return QgsProject::instance()->layoutManager()->readXml(doc.documentElement(), doc);
+}
+
+bool QgisApi_layoutsPending() {
+  return !gDeferredLayoutsFile.isEmpty();
 }
 
 QgsRectangle QgisApi_fullExtent(std::optional<emscripten::val> layerIds) {
@@ -449,6 +499,7 @@ bool QgisApi_addMapLayer(const VectorLayer &layer) {
 // QgsProject::instance() singleton is reset to an empty state ready to
 // build a fresh project on top of.
 void QgisApi_clearProject() {
+  gDeferredLayoutsFile.clear();
   QgsProject::instance()->clear();
 }
 
@@ -491,6 +542,9 @@ EMSCRIPTEN_BINDINGS(QgisApi) {
     .field("success", &LayerDefinitionResult::success)
     .field("errorMessage", &LayerDefinitionResult::errorMessage);
   emscripten::function("loadProject", &QgisApi_loadProject);
+  emscripten::function("loadProjectWithoutLayouts", &QgisApi_loadProjectWithoutLayouts);
+  emscripten::function("ensureLayouts", &QgisApi_ensureLayouts);
+  emscripten::function("layoutsPending", &QgisApi_layoutsPending);
   emscripten::function("fullExtent", &QgisApi_fullExtent);
   emscripten::function("srid", &QgisApi_srid);
   emscripten::function("renderImage", &QgisApi_renderImage);

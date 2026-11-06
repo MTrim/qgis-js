@@ -1,7 +1,8 @@
 // Print layouts: list the layouts stored in the loaded project and export
 // them (optionally per atlas feature) as PDF or PNG.
 //
-// Layouts are read into the project's layout manager by QgsProject::read(),
+// Layouts are read into the project's layout manager by QgsProject::read()
+// (or on first use after loadProjectWithoutLayouts(), mg10),
 // so no .qpt template is needed. Export runs synchronously in the calling
 // thread; map items render with QgsMapRendererCustomPainterJob, which does
 // not need worker threads.
@@ -47,9 +48,12 @@
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+bool QgisApi_ensureLayouts();  // QgisApi.cpp, layouts read on demand (mg10)
+
 namespace {
 
 QgsPrintLayout *findLayout(const std::string &name) {
+  QgisApi_ensureLayouts();
   return dynamic_cast<QgsPrintLayout *>(
     QgsProject::instance()->layoutManager()->layoutByName(QString::fromStdString(name)));
 }
@@ -234,6 +238,7 @@ struct MapOverrides {
 // [{ name, pages, atlas: { enabled, coverageLayerId, coverageLayerName },
 //    pageInfo: [{ width, height, maps: [...] }] (see appendPageInfo) }]
 emscripten::val QgisLayouts_layouts() {
+  QgisApi_ensureLayouts();
   emscripten::val list = emscripten::val::array();
   const QList<QgsPrintLayout *> layouts = QgsProject::instance()->layoutManager()->printLayouts();
   for (QgsPrintLayout *layout : layouts) {

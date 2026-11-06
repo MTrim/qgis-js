@@ -26,6 +26,22 @@ export interface CommonQgisApi extends QgisModelConstructors {
   loadProject(filename: string): boolean;
 
   /**
+   * Like `loadProject`, but skips the print layouts. They are read from the
+   * same file on first use of `layouts()` or `exportLayout()`, or explicitly
+   * with `ensureLayouts()`. Projects with many layouts open much faster.
+   */
+  loadProjectWithoutLayouts(filename: string): boolean;
+
+  /**
+   * Reads layouts skipped by `loadProjectWithoutLayouts`, once. Returns
+   * false if the project file could not be read again.
+   */
+  ensureLayouts(): boolean;
+
+  /** True while layouts skipped by `loadProjectWithoutLayouts` are not read yet. */
+  layoutsPending(): boolean;
+
+  /**
    * Drops all layers, layouts and variables from the current project,
    * leaving an empty project ready to be populated from JS — useful when
    * building a project dynamically with `QgsVectorLayer.createMemoryLayer`
