@@ -41,6 +41,7 @@
 #include "../model/QgsMapRendererJob.hpp"
 #include "../model/QgsMapRendererParallelJob.hpp"
 #include "../model/QgsMapRendererQImageJob.hpp"
+#include "../model/QgsMapRendererSequentialJob.hpp"
 #include "../model/QgsMultiCurve.hpp"
 #include "../model/QgsMultiLineString.hpp"
 #include "../model/QgsMultiPoint.hpp"
@@ -286,7 +287,7 @@ void QgisApi_renderImage(
   job->start();
 }
 
-QgsMapRendererParallelJob *QgisApi_renderJob(
+static QgsMapSettings renderJobSettings(
   std::string srid,
   const QgsRectangle &extent,
   unsigned int width,
@@ -339,10 +340,52 @@ QgsMapRendererParallelJob *QgisApi_renderJob(
   mapSettings.setRendererUsage(Qgis::RendererUsage::View);
   // END optimizations
 
-  QgsMapRendererParallelJob *job = new QgsMapRendererParallelJob(mapSettings);
+    return mapSettings;
+}
 
+QgsMapRendererParallelJob *QgisApi_renderJob(
+  std::string srid,
+  const QgsRectangle &extent,
+  unsigned int width,
+  unsigned int height,
+  float pixelRatio,
+  std::optional<emscripten::val> layerIds,
+  std::optional<emscripten::val> rotation) {
+  QgsMapRendererParallelJob *job = new QgsMapRendererParallelJob(
+    renderJobSettings(srid, extent, width, height, pixelRatio, layerIds, rotation));
   job->start();
+  return job;
+}
 
+// mobileGIS (4.2.2-mg11): all layers in ONE worker thread into one image.
+// The parallel job renders each layer into its own image and composes them
+// on the main thread (QgsMapRendererParallelJob::renderLayersFinished), which
+// blocks the browser for 0.5-1.3 s per frame with ~70 layers on a slow CPU.
+// The sequential job composes inside the worker (QgsMapRendererCustomPainterJob).
+// Exception: layers with "draw above labels" (rendering/renderAboveLabels)
+// are only honoured by composeImage, the custom painter job would draw them
+// below the labels; such maps keep the parallel job.
+QgsMapRendererQImageJob *QgisApi_renderJobSequential(
+  std::string srid,
+  const QgsRectangle &extent,
+  unsigned int width,
+  unsigned int height,
+  float pixelRatio,
+  std::optional<emscripten::val> layerIds,
+  std::optional<emscripten::val> rotation) {
+  const QgsMapSettings settings =
+    renderJobSettings(srid, extent, width, height, pixelRatio, layerIds, rotation);
+  bool aboveLabels = false;
+  for (const QgsMapLayer *layer : settings.layers()) {
+    if (layer && layer->customProperty(QStringLiteral("rendering/renderAboveLabels")).toBool()) {
+      aboveLabels = true;
+      break;
+    }
+  }
+  QgsMapRendererQImageJob *job = aboveLabels
+    ? static_cast<QgsMapRendererQImageJob *>(new QgsMapRendererParallelJob(settings))
+    : static_cast<QgsMapRendererQImageJob *>(new QgsMapRendererSequentialJob(settings));
+  job->start();
   return job;
 }
 
@@ -565,6 +608,8 @@ EMSCRIPTEN_BINDINGS(QgisApi) {
   emscripten::function("renderImage", &QgisApi_renderImage);
   emscripten::function("renderXYZTile", &QgisApi_renderXYZTile);
   emscripten::function("renderJob", &QgisApi_renderJob, emscripten::allow_raw_pointers());
+  emscripten::function(
+    "renderJobSequential", &QgisApi_renderJobSequential, emscripten::allow_raw_pointers());
   emscripten::function("transformRectangle", &QgisApi_transformRectangle);
   emscripten::function("layerTreeRoot", &QgisApi_layerTreeRoot);
   emscripten::function("mapThemes", &QgisApi_mapThemes);

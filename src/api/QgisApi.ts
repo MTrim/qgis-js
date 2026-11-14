@@ -1,6 +1,7 @@
 import {
   QgisModelConstructors,
   QgsMapRendererParallelJob,
+  QgsMapRendererQImageJob,
   QgsRectangle,
   QgsLayerTreeGroup,
   QgsVectorLayer,
@@ -226,6 +227,23 @@ export interface CommonQgisApi extends QgisModelConstructors {
     layerIds?: string[],
     rotation?: number,
   ): QgsMapRendererParallelJob;
+
+  /**
+   * Like {@link renderJob}, but renders all layers in one worker thread into a
+   * single image (QgsMapRendererSequentialJob). No per-layer images are composed
+   * on the main thread, so the page stays responsive while rendering; layers are
+   * not rendered in parallel. Maps with a layer drawn above labels
+   * (rendering/renderAboveLabels) fall back to the parallel job. (mobileGIS 4.2.2-mg11)
+   */
+  renderJobSequential(
+    srid: string,
+    extent: QgsRectangle,
+    width: number,
+    height: number,
+    pixelRatio: number,
+    layerIds?: string[],
+    rotation?: number,
+  ): QgsMapRendererQImageJob;
 
   /**
    * Identifies vector features intersecting a rectangle, walking visible
