@@ -344,9 +344,14 @@ void QgisApi_renderImage(
   mapSettings.setRendererUsage(Qgis::RendererUsage::View);
   // END optimizations
 
-  QgsMapRendererParallelJob *job = new QgsMapRendererParallelJob(mapSettings);
+  // Sequential (mg13, mobileVIEW#690): the parallel job never finished with
+  // four or more layers whose expression fields run aggregate() on the same
+  // child table (WartungTest), and every synchronous layer access then waited
+  // on it. The map has rendered sequentially since mg11; reports and overview
+  // maps (renderImage) now do the same.
+  QgsMapRendererSequentialJob *job = new QgsMapRendererSequentialJob(mapSettings);
 
-  QObject::connect(job, &QgsMapRendererParallelJob::finished, [job, callback] {
+  QObject::connect(job, &QgsMapRendererSequentialJob::finished, [job, callback] {
     auto image = job->renderedImage();
     image.rgbSwap(); // for html canvas
     callback(emscripten::val(emscripten::typed_memory_view(
