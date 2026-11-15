@@ -48,6 +48,12 @@ int main(int argc, char *argv[]) {
   CPLSetConfigOption("OGR_SQLITE_SYNCHRONOUS", "OFF");
   CPLSetConfigOption("NOLOCK", "YES");
   CPLSetConfigOption("IMMUTABLE", "YES");
+  // GDAL's own UTF-8 LIKE (case folding per code point) made GDALOpen of a
+  // GeoPackage cost ~100 ms in WASM: the open scans sqlite_master with LIKE
+  // patterns (FixupWrongRTreeTrigger, GetNameTypeMapFromSQliteMaster). 167
+  // layers took 16.5 of 18.5 s project load (mobileVIEW#674). SQLite's
+  // built-in LIKE is ASCII-case-insensitive, which is all these need.
+  CPLSetConfigOption("OGR_SQLITE_USE_CUSTOM_LIKE", "NO");
   // END optimizations
 
   // needed?
