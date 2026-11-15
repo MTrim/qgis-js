@@ -43,6 +43,13 @@ export interface CommonQgisApi extends QgisModelConstructors {
   layoutsPending(): boolean;
 
   /**
+   * Reads one layout skipped by `loadProjectWithoutLayouts`, by name; the
+   * others stay deferred (`exportLayout` and `layout` do this themselves).
+   * True if the layout is available afterwards.
+   */
+  ensureLayout(name: string): boolean;
+
+  /**
    * Drops all layers, layouts and variables from the current project,
    * leaving an empty project ready to be populated from JS — useful when
    * building a project dynamically with `QgsVectorLayer.createMemoryLayer`
@@ -192,6 +199,12 @@ export interface CommonQgisApi extends QgisModelConstructors {
    * @returns One entry per print layout with its page count and atlas settings.
    */
   layouts(): PrintLayoutInfo[];
+
+  /**
+   * One layout like an entry of `layouts()`, reading only this one while the
+   * layouts are deferred. `null` if the project has no layout of that name.
+   */
+  layout(name: string): PrintLayoutInfo | null;
 
   /**
    * Exports a print layout of the loaded project.

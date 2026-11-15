@@ -16,6 +16,9 @@
 #include <qgsproject.h>
 #include <qgsarchive.h>
 #include <qgslayoutmanager.h>
+#include <qgsprintlayout.h>
+#include <qgsreadwritecontext.h>
+#include <qgslayoutundostack.h>
 #include <QDomDocument>
 #include <QFile>
 #include <qgstiles.h>
@@ -94,15 +97,72 @@ QList<QgsMapLayer *> resolveLayers(std::optional<emscripten::val> layerIds) {
 // 7.9 s for 9 layouts), although most sessions never print.
 // loadProjectWithoutLayouts() skips them, QgisApi_ensureLayouts() reads them
 // from the same file on first use (layouts(), exportLayout()).
+// mg13: QgisApi_ensureLayout(name) reads a single one, so the first print
+// waits only for the chosen layout (Demo_Gemeinde: plan 0.1 s instead of 7.8 s
+// for all, the maintenance books cost about 3 s each).
 namespace {
 QString gDeferredLayoutsFile;  // empty = nothing pending
+QDomDocument gDeferredDoc;     // <qgis><Layouts>…</Layouts></qgis>, parsed once
+bool gDeferredParsed = false;
+
+void resetDeferred(const QString &file = QString()) {
+  gDeferredLayoutsFile = file;
+  gDeferredDoc = QDomDocument();
+  gDeferredParsed = false;
 }
+
+// Only the <Layouts> block: parsing the whole project again costs more than
+// the layouts themselves (Demo_Gemeinde: 16 MB XML, 8.5 s instead of the
+// 6.7 s saved). Falls back to the whole file if the block is not found.
+bool parseDeferred() {
+  if (gDeferredParsed) return true;
+  QString qgsPath = gDeferredLayoutsFile;
+  QgsProjectArchive archive;
+  if (qgsPath.endsWith(QStringLiteral(".qgz"), Qt::CaseInsensitive)) {
+    if (!archive.unzip(qgsPath)) return false;
+    qgsPath = archive.projectFile();
+  }
+  QFile file(qgsPath);
+  if (!file.open(QIODevice::ReadOnly)) return false;
+  const QByteArray bytes = file.readAll();
+  const int start = bytes.indexOf("<Layouts");
+  const int end = bytes.indexOf("</Layouts>", start);
+  bool parsed = false;
+  if (start >= 0 && end > start) {
+    QByteArray part("<qgis>");
+    part.append(bytes.mid(start, end - start + int(strlen("</Layouts>"))));
+    part.append("</qgis>");
+    parsed = static_cast<bool>(gDeferredDoc.setContent(part));
+  }
+  if (!parsed && !gDeferredDoc.setContent(bytes)) return false;
+  gDeferredParsed = true;
+  return true;
+}
+
+QDomElement deferredLayoutsElement() {
+  const QDomElement root = gDeferredDoc.documentElement();
+  return root.tagName() == QLatin1String("Layouts") ? root : root.firstChildElement(QStringLiteral("Layouts"));
+}
+
+// Same steps as QgsLayoutManager::readXml() for one <Layout> element, without
+// its clear() (that would drop the layouts already read)
+bool readOneLayout(const QDomElement &element) {
+  QgsProject *project = QgsProject::instance();
+  QgsReadWriteContext context;
+  context.setPathResolver(project->pathResolver());
+  auto layout = std::make_unique<QgsPrintLayout>(project);
+  layout->undoStack()->blockCommands(true);
+  if (!layout->readLayoutXml(element, gDeferredDoc, context)) return false;
+  layout->undoStack()->blockCommands(false);
+  return project->layoutManager()->addLayout(layout.release());
+}
+}  // namespace
 
 bool QgisApi_loadProject(std::string filename) {
   Qgis::ProjectReadFlags readFlags =
     Qgis::ProjectReadFlag::ForceReadOnlyLayers | Qgis::ProjectReadFlag::TrustLayerMetadata;
 
-  gDeferredLayoutsFile.clear();
+  resetDeferred();
   bool res = QgsProject::instance()->read(QString::fromStdString(filename), readFlags);
   if (!res) return false;
 
@@ -114,45 +174,55 @@ bool QgisApi_loadProjectWithoutLayouts(std::string filename) {
                                      Qgis::ProjectReadFlag::TrustLayerMetadata |
                                      Qgis::ProjectReadFlag::DontLoadLayouts;
 
-  gDeferredLayoutsFile.clear();
+  resetDeferred();
   bool res = QgsProject::instance()->read(QString::fromStdString(filename), readFlags);
   if (!res) return false;
-  gDeferredLayoutsFile = QString::fromStdString(filename);
+  resetDeferred(QString::fromStdString(filename));
   return true;
 }
 
-// Reads the layouts skipped by loadProjectWithoutLayouts(), once. Same call
-// as QgsProject::readProjectFile() makes, on the root element of the file.
-// Returns false if the file cannot be read (layouts stay empty).
+// Reads the layouts skipped by loadProjectWithoutLayouts(), once. None read
+// yet: the manager's own readXml (also old composers and reports). Some read
+// singly already: only the missing <Layout> elements, the others stay.
+// Returns false if the file cannot be read (layouts stay as they are).
 bool QgisApi_ensureLayouts() {
   if (gDeferredLayoutsFile.isEmpty()) return true;
-  const QString source = gDeferredLayoutsFile;
-  gDeferredLayoutsFile.clear();
-  QString qgsPath = source;
-  QgsProjectArchive archive;
-  if (source.endsWith(QStringLiteral(".qgz"), Qt::CaseInsensitive)) {
-    if (!archive.unzip(source)) return false;
-    qgsPath = archive.projectFile();
+  if (!parseDeferred()) {
+    resetDeferred();
+    return false;
   }
-  QFile file(qgsPath);
-  if (!file.open(QIODevice::ReadOnly)) return false;
-  const QByteArray bytes = file.readAll();
-  // Only the <Layouts> block: parsing the whole project again costs more
-  // than the layouts themselves (Demo_Gemeinde: 16 MB XML, 8.5 s instead of
-  // the 6.7 s saved). readXml() looks for <Layouts> below the element it gets
-  // and resolves layers through the already loaded project.
-  QDomDocument doc;
-  const int start = bytes.indexOf("<Layouts");
-  const int end = bytes.indexOf("</Layouts>", start);
-  bool parsed = false;
-  if (start >= 0 && end > start) {
-    QByteArray part("<qgis>");
-    part.append(bytes.mid(start, end - start + int(strlen("</Layouts>"))));
-    part.append("</qgis>");
-    parsed = static_cast<bool>(doc.setContent(part));
+  QgsLayoutManager *manager = QgsProject::instance()->layoutManager();
+  bool ok = true;
+  if (manager->layouts().isEmpty()) {
+    ok = manager->readXml(gDeferredDoc.documentElement(), gDeferredDoc);
+  } else {
+    const QDomNodeList nodes = deferredLayoutsElement().childNodes();
+    for (int i = 0; i < nodes.size(); ++i) {
+      const QDomElement element = nodes.at(i).toElement();
+      if (element.tagName() != QLatin1String("Layout")) continue;
+      if (manager->layoutByName(element.attribute(QStringLiteral("name")))) continue;
+      ok = readOneLayout(element) && ok;
+    }
   }
-  if (!parsed && !doc.setContent(bytes)) return false;
-  return QgsProject::instance()->layoutManager()->readXml(doc.documentElement(), doc);
+  resetDeferred();
+  return ok;
+}
+
+// Reads one deferred layout by name (mg13). True if it is there afterwards
+// (or nothing is deferred), false if the name is unknown or unreadable.
+bool QgisApi_ensureLayout(std::string name) {
+  QgsLayoutManager *manager = QgsProject::instance()->layoutManager();
+  const QString wanted = QString::fromStdString(name);
+  if (manager->layoutByName(wanted)) return true;
+  if (gDeferredLayoutsFile.isEmpty()) return false;
+  if (!parseDeferred()) return false;
+  const QDomNodeList nodes = deferredLayoutsElement().childNodes();
+  for (int i = 0; i < nodes.size(); ++i) {
+    const QDomElement element = nodes.at(i).toElement();
+    if (element.tagName() == QLatin1String("Layout") && element.attribute(QStringLiteral("name")) == wanted)
+      return readOneLayout(element);
+  }
+  return false;
 }
 
 bool QgisApi_layoutsPending() {
@@ -603,6 +673,7 @@ EMSCRIPTEN_BINDINGS(QgisApi) {
   emscripten::function("loadProjectWithoutLayouts", &QgisApi_loadProjectWithoutLayouts);
   emscripten::function("ensureLayouts", &QgisApi_ensureLayouts);
   emscripten::function("layoutsPending", &QgisApi_layoutsPending);
+  emscripten::function("ensureLayout", &QgisApi_ensureLayout);
   emscripten::function("fullExtent", &QgisApi_fullExtent);
   emscripten::function("srid", &QgisApi_srid);
   emscripten::function("renderImage", &QgisApi_renderImage);

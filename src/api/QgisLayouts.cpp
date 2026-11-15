@@ -49,11 +49,12 @@
 #include <emscripten/val.h>
 
 bool QgisApi_ensureLayouts();  // QgisApi.cpp, layouts read on demand (mg10)
+bool QgisApi_ensureLayout(std::string name);  // QgisApi.cpp, one layout (mg13)
 
 namespace {
 
 QgsPrintLayout *findLayout(const std::string &name) {
-  QgisApi_ensureLayouts();
+  QgisApi_ensureLayout(name);  // only this one, the others stay deferred (mg13)
   return dynamic_cast<QgsPrintLayout *>(
     QgsProject::instance()->layoutManager()->layoutByName(QString::fromStdString(name)));
 }
@@ -237,32 +238,43 @@ struct MapOverrides {
 
 // [{ name, pages, atlas: { enabled, coverageLayerId, coverageLayerName },
 //    pageInfo: [{ width, height, maps: [...] }] (see appendPageInfo) }]
+namespace {
+emscripten::val layoutEntry(QgsPrintLayout *layout) {
+  emscripten::val entry = emscripten::val::object();
+  entry.set("name", layout->name().toStdString());
+  entry.set("pages", layout->pageCollection()->pageCount());
+
+  QgsLayoutAtlas *atlas = layout->atlas();
+  emscripten::val atlasInfo = emscripten::val::object();
+  const bool atlasEnabled = atlas && atlas->enabled() && atlas->coverageLayer();
+  atlasInfo.set("enabled", atlasEnabled);
+  if (atlasEnabled) {
+    atlasInfo.set("coverageLayerId", atlas->coverageLayer()->id().toStdString());
+    atlasInfo.set("coverageLayerName", atlas->coverageLayer()->name().toStdString());
+    atlasInfo.set("filterFeatures", atlas->filterFeatures());
+  }
+  entry.set("atlas", atlasInfo);
+  // map items as stored in the project (unrotated extents, mm on the page)
+  emscripten::val pageInfo = emscripten::val::array();
+  appendPageInfo(layout, pageInfo);
+  entry.set("pageInfo", pageInfo);
+  return entry;
+}
+}  // namespace
+
 emscripten::val QgisLayouts_layouts() {
   QgisApi_ensureLayouts();
   emscripten::val list = emscripten::val::array();
   const QList<QgsPrintLayout *> layouts = QgsProject::instance()->layoutManager()->printLayouts();
-  for (QgsPrintLayout *layout : layouts) {
-    emscripten::val entry = emscripten::val::object();
-    entry.set("name", layout->name().toStdString());
-    entry.set("pages", layout->pageCollection()->pageCount());
-
-    QgsLayoutAtlas *atlas = layout->atlas();
-    emscripten::val atlasInfo = emscripten::val::object();
-    const bool atlasEnabled = atlas && atlas->enabled() && atlas->coverageLayer();
-    atlasInfo.set("enabled", atlasEnabled);
-    if (atlasEnabled) {
-      atlasInfo.set("coverageLayerId", atlas->coverageLayer()->id().toStdString());
-      atlasInfo.set("coverageLayerName", atlas->coverageLayer()->name().toStdString());
-      atlasInfo.set("filterFeatures", atlas->filterFeatures());
-    }
-    entry.set("atlas", atlasInfo);
-    // map items as stored in the project (unrotated extents, mm on the page)
-    emscripten::val pageInfo = emscripten::val::array();
-    appendPageInfo(layout, pageInfo);
-    entry.set("pageInfo", pageInfo);
-    list.call<void>("push", entry);
-  }
+  for (QgsPrintLayout *layout : layouts) list.call<void>("push", layoutEntry(layout));
   return list;
+}
+
+// One layout like an entry of layouts(), reading only this one if the
+// layouts are still deferred (mg13). null if there is no such layout.
+emscripten::val QgisLayouts_layout(std::string name) {
+  QgsPrintLayout *layout = findLayout(name);
+  return layout ? layoutEntry(layout) : emscripten::val::null();
 }
 
 // Legend entries for layers QGIS cannot load here (online layers, which the
@@ -625,5 +637,6 @@ emscripten::val QgisLayouts_exportLayout(std::string name, std::optional<emscrip
 
 EMSCRIPTEN_BINDINGS(QgisLayouts) {
   emscripten::function("layouts", &QgisLayouts_layouts);
+  emscripten::function("layout", &QgisLayouts_layout);
   emscripten::function("exportLayout", &QgisLayouts_exportLayout);
 }
